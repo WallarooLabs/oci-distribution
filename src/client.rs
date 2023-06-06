@@ -27,7 +27,7 @@ use olpc_cjson::CanonicalFormatter;
 use reqwest::header::HeaderMap;
 use reqwest::{RequestBuilder, Url};
 use serde::Serialize;
-use sha2::Digest;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::pin::Pin;
@@ -1001,16 +1001,17 @@ impl Client {
         image: Reference,
         blob_data: Vec<u8>,
         start_byte: usize,
+        offset: usize,
     ) -> Result<(String, usize)> {
         if blob_data.is_empty() {
             return Err(OciDistributionError::PushNoDataError);
         };
-        let end_byte = if (start_byte + self.push_chunk_size) < blob_data.len() {
-            start_byte + self.push_chunk_size - 1
+        let end_byte = if (start_byte - offset + self.push_chunk_size) < blob_data.len() {
+            start_byte - offset + self.push_chunk_size - 1
         } else {
             blob_data.len() - 1
         };
-        let body = blob_data[start_byte..end_byte + 1].to_vec();
+        let body = blob_data[(start_byte - offset)..(end_byte - offset) + 1].to_vec();
         let mut headers = HeaderMap::new();
         headers.insert(
             "Content-Range",
@@ -1196,28 +1197,70 @@ impl Client {
             "uploads/",
         )
     }
+
+    /// Creates an async blob upload session.
+    pub async fn stream_blob_upload(&self, image: &Reference) -> Result<StreamBlobWriter> {
+        StreamBlobWriter::new(self.clone(), image.clone()).await
+    }
 }
 
 /// A client for pushing OCI artifacts to a registry from a stream.
-pub struct AsyncBlobPusher {
+pub struct StreamBlobWriter {
     client: Client,
-    offset: usize,
+    start_byte: usize,
     location: String,
     image: Reference,
-    digest: String,
+    hasher: Sha256,
     pending: Option<Pin<Box<dyn Future<Output = Result<(String, usize)>> + Send>>>,
 }
 
-impl AsyncWrite for AsyncBlobPusher {
+impl StreamBlobWriter {
+    async fn new(client: Client, image: Reference) -> Result<Self> {
+        let location = client.begin_push_chunked_session(&image).await?;
+
+        Ok(Self {
+            client,
+            start_byte: 0,
+            location,
+            image,
+            hasher: Sha256::new(),
+            pending: None,
+        })
+    }
+
+    /// Finalizes the upload and returns the URL of the uploaded blob.
+    pub async fn finalize(self) -> Result<String> {
+        self.client
+            .end_push_chunked_session(
+                &self.location,
+                &self.image,
+                &format!("{:x}", self.hasher.finalize()),
+            )
+            .await
+    }
+}
+
+impl AsyncWrite for StreamBlobWriter {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::result::Result<usize, std::io::Error>> {
         let this = self.get_mut();
+
+        // Update hasher
+        this.hasher.update(buf);
+
         this.pending = match this.pending.take() {
             Some(mut pending) => match pending.poll_unpin(cx) {
-                Poll::Ready(_) => return Poll::Ready(Ok(buf.len())),
+                Poll::Ready(Ok((location, next_start))) => {
+                    this.start_byte = next_start;
+                    this.location = location;
+                    return Poll::Ready(Ok(buf.len()));
+                }
+                Poll::Ready(Err(e)) => {
+                    return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::Other, e)))
+                }
                 Poll::Pending => Some(pending),
             },
             None => Some(
@@ -1227,7 +1270,8 @@ impl AsyncWrite for AsyncBlobPusher {
                         this.location.clone(),
                         this.image.clone(),
                         buf.into(),
-                        this.offset,
+                        this.start_byte,
+                        this.start_byte,
                     )
                     .boxed(),
             ),
