@@ -29,7 +29,7 @@ impl fmt::Debug for RegistryToken {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum RegistryTokenType {
     Bearer(RegistryToken),
     Basic(String, String),
@@ -57,7 +57,7 @@ pub enum RegistryOperation {
     Pull,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct TokenCache {
     // (registry, repository, scope) -> (token, expiration)
     tokens: BTreeMap<(String, String, RegistryOperation), (RegistryTokenType, u64)>,
