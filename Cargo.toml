@@ -55,14 +55,15 @@ tracing = { version = "0.1", features = ['log'] }
 unicase = "2.6"
 
 [dev-dependencies]
+anyhow = "1.0"
 assert-json-diff = "2.0.2"
 async-std = "1.12"
-anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
-rstest = "0.17.0"
 docker_credential = "1.0"
 hmac = "0.12"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rstest = "0.17.0"
+rust-s3 = { version = "0.32", default-features = false, features = ["no-verify-ssl", "tokio-rustls-tls", "tags"] }
 tempfile = "3.3"
 testcontainers = "0.14"
 tokio = { version = "1.21", features = ["macros", "fs", "rt-multi-thread"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

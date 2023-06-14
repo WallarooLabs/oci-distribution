@@ -2,7 +2,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    client::{Config, ImageLayer},
+    client::{Config, Layer},
     sha256_digest,
 };
 
@@ -117,7 +117,7 @@ impl OciImageManifest {
     /// This can be useful to create an OCI Image Manifest with
     /// custom annotations.
     pub fn build(
-        layers: &[ImageLayer],
+        layers: &[impl Layer],
         config: &Config,
         annotations: Option<HashMap<String, String>>,
     ) -> Self {
@@ -129,13 +129,13 @@ impl OciImageManifest {
         manifest.annotations = annotations;
 
         for layer in layers {
-            let digest = sha256_digest(&layer.data);
+            let digest = layer.digest();
 
             let descriptor = OciDescriptor {
-                size: layer.data.len() as i64,
+                size: layer.size() as i64,
                 digest,
-                media_type: layer.media_type.to_string(),
-                annotations: layer.annotations.clone(),
+                media_type: layer.media_type().to_string(),
+                annotations: layer.annotations().cloned(),
                 ..Default::default()
             };
 

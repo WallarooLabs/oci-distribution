@@ -24,13 +24,14 @@ use http::HeaderValue;
 use http_auth::{parser::ChallengeParser, ChallengeRef};
 use olpc_cjson::CanonicalFormatter;
 use reqwest::header::HeaderMap;
-use reqwest::{RequestBuilder, Url};
+use reqwest::{Body, RequestBuilder, Url};
 use serde::Serialize;
 use sha2::Digest;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio_util::compat::FuturesAsyncReadCompatExt;
+use tokio_util::io::ReaderStream;
 use tracing::{debug, trace, warn};
 
 const MIME_TYPES_DISTRIBUTION_MANIFEST: &[&str] = &[
@@ -68,6 +69,21 @@ pub struct PushResponse {
     pub config_url: String,
     /// Pullable url for the manifest
     pub manifest_url: String,
+}
+
+/// Defines common operations for layers
+pub trait Layer {
+    /// Returns the SHA-256 digest of the layer
+    fn digest(&self) -> String;
+
+    /// Returns the size of the layer
+    fn size(&self) -> usize;
+
+    /// Returns the media type of the layer
+    fn media_type(&self) -> &str;
+
+    /// Returns the annotations of the layer
+    fn annotations(&self) -> Option<&HashMap<String, String>>;
 }
 
 /// The data and media type for an image layer
@@ -110,6 +126,79 @@ impl ImageLayer {
     /// Helper function to compute the sha256 digest of an image layer
     pub fn sha256_digest(&self) -> String {
         sha256_digest(&self.data)
+    }
+}
+
+impl Layer for ImageLayer {
+    fn digest(&self) -> String {
+        self.sha256_digest()
+    }
+
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    fn annotations(&self) -> Option<&HashMap<String, String>> {
+        self.annotations.as_ref()
+    }
+}
+
+/// The data and media type for an image layer that is read asynchronously
+pub struct ImageLayerStream<T: AsyncRead + Send + Sync + 'static> {
+    /// The data stream of this layer, needs to implement `AsyncRead`
+    pub data: T,
+
+    /// The media type of this layer
+    pub media_type: String,
+
+    /// This OPTIONAL property contains arbitrary metadata for this descriptor.
+    pub annotations: Option<HashMap<String, String>>,
+
+    /// The SHA-256 digest of this layer
+    pub digest: String,
+
+    /// The size of this layer
+    pub size: usize,
+}
+
+impl<T: AsyncRead + Send + Sync + 'static> Layer for ImageLayerStream<T> {
+    fn digest(&self) -> String {
+        self.digest.clone()
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    fn annotations(&self) -> Option<&HashMap<String, String>> {
+        self.annotations.as_ref()
+    }
+}
+
+impl<T: AsyncRead + Send + Sync + 'static> ImageLayerStream<T> {
+    /// Constructs a new ImageLayer struct with provided data and media type
+    pub fn new(
+        data: T,
+        media_type: impl ToString,
+        annotations: Option<HashMap<String, String>>,
+        digest: impl ToString,
+        size: usize,
+    ) -> Self {
+        Self {
+            data,
+            media_type: media_type.to_string(),
+            annotations,
+            digest: digest.to_string(),
+            size,
+        }
     }
 }
 
@@ -391,6 +480,79 @@ impl Client {
         })
     }
 
+    /// Push an image and return the uploaded URL of the image
+    ///
+    /// The client will check if it's already been authenticated and if
+    /// not will attempt to do.
+    ///
+    /// If a manifest is not provided, the client will attempt to generate
+    /// it from the provided image and config data.
+    ///
+    /// Returns pullable URL for the image
+    pub async fn push_stream<T: AsyncRead + Send + Sync + 'static>(
+        &mut self,
+        image_ref: &Reference,
+        layers: Vec<ImageLayerStream<T>>,
+        config: Config,
+        auth: &RegistryAuth,
+        manifest: Option<OciImageManifest>,
+    ) -> Result<PushResponse> {
+        debug!("Pushing image: {:?}", image_ref);
+        let op = RegistryOperation::Push;
+        if !self.tokens.contains_key(image_ref, op) {
+            self.auth(image_ref, auth, op).await?;
+        }
+
+        let manifest: OciImageManifest = match manifest {
+            Some(m) => m,
+            None => OciImageManifest::build(layers.as_slice(), &config, None),
+        };
+
+        // Upload layers
+        stream::iter(layers)
+            .map(|layer| {
+                let this = &self;
+                async move {
+                    // this.push_blob_stream_monolithically(image_ref, layer.data, &digest)
+                    //     .await?;
+                    let location = this.begin_push_monolithical_session(image_ref).await?;
+                    this.push_stream_monolithically(
+                        &location,
+                        image_ref,
+                        layer.data,
+                        layer.size,
+                        &layer.digest,
+                    )
+                    .await?;
+                    Ok(()) as Result<()>
+                }
+            })
+            .buffer_unordered(self.config.max_concurrent_upload)
+            .try_for_each(future::ok)
+            .await?;
+
+        let config_url = match self
+            .push_blob_chunked(image_ref, &config.data, &manifest.config.digest)
+            .await
+        {
+            Ok(url) => url,
+            Err(OciDistributionError::SpecViolationError(violation)) => {
+                warn!(?violation, "Registry is not respecting the OCI Distribution Specification when doing chunked push operations");
+                warn!("Attempting monolithic push");
+                self.push_blob_monolithically(image_ref, &config.data, &manifest.config.digest)
+                    .await?
+            }
+            Err(e) => return Err(e),
+        };
+
+        let manifest_url = self.push_manifest(image_ref, &manifest.into()).await?;
+
+        Ok(PushResponse {
+            config_url,
+            manifest_url,
+        })
+    }
+
     /// Pushes a blob to the registry as a monolith
     ///
     /// Returns the pullable location of the blob
@@ -404,7 +566,6 @@ impl Client {
         self.push_monolithically(&location, image, blob_data, blob_digest)
             .await
     }
-
     /// Pushes a blob to the registry as a series of chunks
     ///
     /// Returns the pullable location of the blob
@@ -925,6 +1086,44 @@ impl Client {
             .into_request_builder()
             .headers(headers)
             .body(layer.to_vec())
+            .send()
+            .await?;
+
+        // Returns location
+        self.extract_location_header(image, res, &reqwest::StatusCode::CREATED)
+            .await
+    }
+
+    /// Pushes a layer to a registry as a monolithical blob.
+    ///
+    /// Returns the URL location for the next layer
+    async fn push_stream_monolithically(
+        &self,
+        location: &str,
+        image: &Reference,
+        layer: impl AsyncRead + Send + Sync + 'static,
+        size: usize,
+        blob_digest: &str,
+    ) -> Result<String> {
+        let mut url = Url::parse(location).unwrap();
+        url.query_pairs_mut().append_pair("digest", blob_digest);
+        let url = url.to_string();
+
+        debug!(size = size, location = ?url, "Pushing stream monolithically");
+        // if layer.is_empty() {
+        //     return Err(OciDistributionError::PushNoDataError);
+        // };
+        let mut headers = HeaderMap::new();
+        headers.insert("Content-Length", format!("{}", size).parse().unwrap());
+        headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
+
+        let stream = ReaderStream::new(layer);
+
+        let res = RequestBuilderWrapper::from_client(&self, |client| client.put(&url))
+            .apply_auth(image, RegistryOperation::Push)?
+            .into_request_builder()
+            .headers(headers)
+            .body(Body::wrap_stream(stream))
             .send()
             .await?;
 
@@ -2451,5 +2650,63 @@ mod test {
         c.pull_image_manifest(&dest_image, &RegistryAuth::Anonymous)
             .await
             .expect("Failed to pull manifest");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_roundtrip_stream_multiple_layers() {
+        use tokio::io::duplex;
+        let _ = tracing_subscriber::fmt::try_init();
+        let mut c = Client::new(ClientConfig {
+            protocol: ClientProtocol::HttpsExcept(vec!["oci.registry.local".to_string()]),
+            ..Default::default()
+        });
+
+        let src_image = Reference::try_from("registry:2.7.1").expect("failed to parse reference");
+        let dest_image = Reference::try_from("oci.registry.local/registry:roundtrip-test")
+            .expect("failed to parse reference");
+
+        let image = c
+            .pull(
+                &src_image,
+                &RegistryAuth::Anonymous,
+                vec![IMAGE_DOCKER_LAYER_GZIP_MEDIA_TYPE],
+            )
+            .await
+            .expect("Failed to pull manifest");
+        assert!(image.layers.len() > 1);
+
+        let ImageData {
+            layers,
+            config,
+            manifest,
+            ..
+        } = image;
+
+        let mut pushed_layers = vec![];
+        for layer in layers {
+            let (mut writer, reader) = duplex(1_048_576);
+            writer
+                .write_all(layer.data.as_slice())
+                .await
+                .expect("failed to write layer to buffer");
+            pushed_layers.push(ImageLayerStream::new(
+                reader,
+                layer.media_type.clone(),
+                layer.annotations.clone(),
+                layer.sha256_digest(),
+                layer.data.len(),
+            ));
+        }
+
+        c.push_stream(
+            &dest_image,
+            pushed_layers,
+            config,
+            &RegistryAuth::Anonymous,
+            manifest,
+        )
+        .await
+        .expect("Failed to push stream");
     }
 }
