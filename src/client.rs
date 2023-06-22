@@ -18,8 +18,8 @@ use crate::Reference;
 
 use crate::errors::{OciDistributionError, Result};
 use crate::token_cache::{RegistryOperation, RegistryToken, RegistryTokenType, TokenCache};
-use futures_util::future;
-use futures_util::stream::{self, StreamExt, TryStreamExt};
+use futures_util::stream::{self, FuturesUnordered, StreamExt, TryStreamExt};
+use futures_util::{future, TryFutureExt};
 use http::HeaderValue;
 use http_auth::{parser::ChallengeParser, ChallengeRef};
 use olpc_cjson::CanonicalFormatter;
@@ -397,6 +397,52 @@ impl Client {
             config,
             digest: Some(digest),
         })
+    }
+
+    /// Stream an image from one registry to another
+    pub async fn copy_image_stream(
+        &mut self,
+        (from_ref, from_auth): (&Reference, &RegistryAuth),
+        (to_ref, to_auth): (&Reference, &RegistryAuth),
+    ) -> Result<PushResponse> {
+        // If the to_ref has a digest, make that it matches the from_ref
+        // If it doesn't, we'll use the digest from the from_ref
+        if to_ref.digest().is_some() && to_ref.digest() != from_ref.digest() {
+            return Err(OciDistributionError::DigestMismatchError);
+        }
+
+        // Get the manifest and config from the from_ref
+        let (manifest, _, config_data) = self.pull_manifest_and_config(from_ref, from_auth).await?;
+
+        // Start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
+        let to_layers = manifest
+            .layers
+            .iter()
+            .map(|from_layer| {
+                self.async_pull_blob(from_ref, &from_layer.digest)
+                    .map_ok(|reader| ImageLayerStream {
+                        data: reader,
+                        media_type: from_layer.media_type.clone(),
+                        annotations: from_layer.annotations.clone(),
+                        digest: from_layer.digest.clone(),
+                        size: from_layer.size as usize,
+                    })
+            })
+            .collect::<FuturesUnordered<_>>()
+            .collect::<Vec<Result<_>>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+
+        // Create a config for new manifest
+        let config = Config::new(
+            config_data.as_bytes().into(),
+            manifest.config.media_type.clone(),
+            manifest.config.annotations.clone(),
+        );
+
+        self.push_stream(to_ref, to_layers, config, to_auth, Some(manifest))
+            .await
     }
 
     /// Push an image and return the uploaded URL of the image

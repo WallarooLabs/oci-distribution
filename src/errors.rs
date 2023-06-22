@@ -90,6 +90,12 @@ pub enum OciDistributionError {
     /// Versioned object: JSON deserialization error
     #[error("Failed to parse manifest: {0}")]
     VersionedParsingError(String),
+    /// Digest required in reference for this operation
+    #[error("Digest required in reference for this operation")]
+    DigestRequiredError,
+    /// Target digest doesn't match the digest in the source reference
+    #[error("Target digest doesn't match the digest in the source reference")]
+    DigestMismatchError,
 }
 
 /// Helper type to declare `Result` objects that might return a `OciDistributionError`
