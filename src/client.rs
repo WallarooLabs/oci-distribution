@@ -402,7 +402,7 @@ impl Client {
     /// Stream an image from one registry to another
     pub async fn copy_image_stream(
         &mut self,
-        (from_ref, from_auth): (&Reference, &RegistryAuth),
+        (from_client, from_ref, from_auth): (&Self, &Reference, &RegistryAuth),
         (to_ref, to_auth): (&Reference, &RegistryAuth),
     ) -> Result<PushResponse> {
         // If the to_ref has a digest, make that it matches the from_ref
@@ -419,7 +419,8 @@ impl Client {
             .layers
             .iter()
             .map(|from_layer| {
-                self.async_pull_blob(from_ref, &from_layer.digest)
+                from_client
+                    .async_pull_blob(from_ref, &from_layer.digest)
                     .map_ok(|reader| ImageLayerStream {
                         data: reader,
                         media_type: from_layer.media_type.clone(),
