@@ -402,7 +402,7 @@ impl Client {
     /// Stream an image from one registry to another
     pub async fn copy_image_stream(
         &mut self,
-        (from_client, from_ref, from_auth): (&Self, &Reference, &RegistryAuth),
+        (mut from_client, from_ref, from_auth): (Self, &Reference, &RegistryAuth),
         (to_ref, to_auth): (&Reference, &RegistryAuth),
     ) -> Result<PushResponse> {
         // If the to_ref has a digest, make that it matches the from_ref
@@ -412,7 +412,12 @@ impl Client {
         }
 
         // Get the manifest and config from the from_ref
-        let (manifest, _, config_data) = self.pull_manifest_and_config(from_ref, from_auth).await?;
+        let (mut manifest, _, config_data) = from_client
+            .pull_manifest_and_config(from_ref, from_auth)
+            .await?;
+
+        // Nullify media type to increase compatibility with older (source) registries
+        manifest.media_type = None;
 
         // Start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
         let to_layers = manifest
