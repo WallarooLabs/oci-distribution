@@ -1061,6 +1061,7 @@ impl Client {
         let res = RequestBuilderWrapper::from_client(self, |client| client.post(url))
             .apply_auth(image, RegistryOperation::Push)?
             .into_request_builder()
+            .header("Content-Length", 0)
             .send()
             .await?;
 
@@ -1333,7 +1334,7 @@ impl Client {
         location_header: &reqwest::header::HeaderValue,
     ) -> Result<String> {
         let lh = location_header.to_str()?;
-        if lh.starts_with("/v2/") {
+        if lh.starts_with("/v2/") || !lh.contains("://") {
             Ok(format!(
                 "{}://{}{}",
                 self.config.protocol.scheme_for(image.resolve_registry()),
