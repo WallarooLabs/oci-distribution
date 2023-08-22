@@ -88,22 +88,8 @@ impl TokenCache {
                     {
                         Ok(token) => token.claims().registered.expiration.unwrap_or(u64::MAX),
                         Err(jwt::Error::NoClaimsComponent) => {
-                            // the token doesn't have a claim that states a
-                            // value for the expiration. We assume it has a 60
-                            // seconds validity as indicated here:
-                            // https://docs.docker.com/registry/spec/auth/token/#requesting-a-token
-                            // > (Optional) The duration in seconds since the token was issued
-                            // > that it will remain valid. When omitted, this defaults to 60 seconds.
-                            // > For compatibility with older clients, a token should never be returned
-                            // > with less than 60 seconds to live.
-                            let now = SystemTime::now();
-                            let epoch = now
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards")
-                                .as_secs();
-                            let expiration = epoch + 600;
-                            debug!(?token, "Cannot extract expiration from token's claims, assuming a 600 seconds validity");
-                            expiration
+                            debug!(?token, "Cannot extract expiration from token's claims, assuming forever");
+                            u64::MAX
                         },
                         Err(error) => {
                             warn!(?error, "Invalid bearer token");
