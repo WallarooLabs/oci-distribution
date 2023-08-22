@@ -101,8 +101,8 @@ impl TokenCache {
                                 .duration_since(UNIX_EPOCH)
                                 .expect("Time went backwards")
                                 .as_secs();
-                            let expiration = epoch + 60;
-                            debug!(?token, "Cannot extract expiration from token's claims, assuming a 60 seconds validity");
+                            let expiration = epoch + 600;
+                            debug!(?token, "Cannot extract expiration from token's claims, assuming a 600 seconds validity");
                             expiration
                         },
                         Err(error) => {
