@@ -420,20 +420,21 @@ impl Client {
         manifest.media_type = None;
 
         // Start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
-        let to_layers = stream::iter(manifest.layers.iter().map(|from_layer| {
-            from_client
-                .async_pull_blob(from_ref, &from_layer.digest)
-                .map_ok(|reader| ImageLayerStream {
-                    data: reader,
-                    media_type: from_layer.media_type.clone(),
-                    annotations: from_layer.annotations.clone(),
-                    digest: from_layer.digest.clone(),
-                    size: from_layer.size as usize,
-                })
-        }))
-        .buffer_unordered(self.config.max_concurrent_upload)
-        .try_collect::<Vec<_>>()
-        .await?;
+        let to_layers = stream::iter(manifest.layers.iter())
+            .map(|from_layer| {
+                from_client
+                    .async_pull_blob(from_ref, &from_layer.digest)
+                    .map_ok(|reader| ImageLayerStream {
+                        data: reader,
+                        media_type: from_layer.media_type.clone(),
+                        annotations: from_layer.annotations.clone(),
+                        digest: from_layer.digest.clone(),
+                        size: from_layer.size as usize,
+                    })
+            })
+            .buffer_unordered(self.config.max_concurrent_upload)
+            .try_collect::<Vec<_>>()
+            .await?;
 
         // Create a config for new manifest
         let config = Config::new(
