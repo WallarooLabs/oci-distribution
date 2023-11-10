@@ -432,6 +432,7 @@ impl Client {
                         size: from_layer.size as usize,
                     })
             })
+            .boxed()
             .buffer_unordered(self.config.max_concurrent_upload)
             .try_collect::<Vec<_>>()
             .await?;
