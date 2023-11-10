@@ -18,7 +18,7 @@ use crate::Reference;
 
 use crate::errors::{OciDistributionError, Result};
 use crate::token_cache::{RegistryOperation, RegistryToken, RegistryTokenType, TokenCache};
-use futures_util::stream::{self, FuturesUnordered, StreamExt, TryStreamExt};
+use futures_util::stream::{self, StreamExt, TryStreamExt};
 use futures_util::{future, TryFutureExt};
 use http::HeaderValue;
 use http_auth::{parser::ChallengeParser, ChallengeRef};
@@ -44,10 +44,10 @@ const MIME_TYPES_DISTRIBUTION_MANIFEST: &[&str] = &[
 const PUSH_CHUNK_MAX_SIZE: usize = 4096 * 1024;
 
 /// Default value for `ClientConfig::max_concurrent_upload`
-pub const DEFAULT_MAX_CONCURRENT_UPLOAD: usize = 16;
+pub const DEFAULT_MAX_CONCURRENT_UPLOAD: usize = 8;
 
 /// Default value for `ClientConfig::max_concurrent_download`
-pub const DEFAULT_MAX_CONCURRENT_DOWNLOAD: usize = 16;
+pub const DEFAULT_MAX_CONCURRENT_DOWNLOAD: usize = 8;
 
 /// The data for an image or module.
 #[derive(Clone)]
@@ -420,25 +420,20 @@ impl Client {
         manifest.media_type = None;
 
         // Start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
-        let to_layers = manifest
-            .layers
-            .iter()
-            .map(|from_layer| {
-                from_client
-                    .async_pull_blob(from_ref, &from_layer.digest)
-                    .map_ok(|reader| ImageLayerStream {
-                        data: reader,
-                        media_type: from_layer.media_type.clone(),
-                        annotations: from_layer.annotations.clone(),
-                        digest: from_layer.digest.clone(),
-                        size: from_layer.size as usize,
-                    })
-            })
-            .collect::<FuturesUnordered<_>>()
-            .collect::<Vec<Result<_>>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+        let to_layers = stream::iter(manifest.layers.iter().map(|from_layer| {
+            from_client
+                .async_pull_blob(from_ref, &from_layer.digest)
+                .map_ok(|reader| ImageLayerStream {
+                    data: reader,
+                    media_type: from_layer.media_type.clone(),
+                    annotations: from_layer.annotations.clone(),
+                    digest: from_layer.digest.clone(),
+                    size: from_layer.size as usize,
+                })
+        }))
+        .buffer_unordered(self.config.max_concurrent_upload)
+        .try_collect::<Vec<_>>()
+        .await?;
 
         // Create a config for new manifest
         let config = Config::new(
