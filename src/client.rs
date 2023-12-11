@@ -19,7 +19,7 @@ use crate::Reference;
 use crate::errors::{OciDistributionError, Result};
 use crate::token_cache::{RegistryOperation, RegistryToken, RegistryTokenType, TokenCache};
 use futures_util::stream::{self, StreamExt, TryStreamExt};
-use futures_util::{future, TryFutureExt};
+use futures_util::{future, FutureExt, Stream, TryFutureExt};
 use http::HeaderValue;
 use http_auth::{parser::ChallengeParser, ChallengeRef};
 use olpc_cjson::CanonicalFormatter;
@@ -147,6 +147,31 @@ impl Layer for ImageLayer {
     }
 }
 
+struct ImageLayerDummy {
+    digest: String,
+    size: usize,
+    media_type: String,
+    annotations: Option<HashMap<String, String>>,
+}
+
+impl Layer for ImageLayerDummy {
+    fn digest(&self) -> String {
+        self.digest.clone()
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    fn annotations(&self) -> Option<&HashMap<String, String>> {
+        self.annotations.as_ref()
+    }
+}
+
 /// The data and media type for an image layer that is read asynchronously
 pub struct ImageLayerStream<T: AsyncRead + Send + Sync + 'static> {
     /// The data stream of this layer, needs to implement `AsyncRead`
@@ -198,6 +223,15 @@ impl<T: AsyncRead + Send + Sync + 'static> ImageLayerStream<T> {
             annotations,
             digest: digest.to_string(),
             size,
+        }
+    }
+
+    fn as_dummy(&self) -> ImageLayerDummy {
+        ImageLayerDummy {
+            digest: self.digest.clone(),
+            size: self.size,
+            media_type: self.media_type.clone(),
+            annotations: self.annotations.clone(),
         }
     }
 }
@@ -419,7 +453,8 @@ impl Client {
         // Nullify media type to increase compatibility with older (source) registries
         manifest.media_type = None;
 
-        // Start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
+        // Instruct `push_stream()` to start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
+        // when it starts processing each layer
         let to_layers = stream::iter(manifest.layers.iter())
             .map(|from_layer| {
                 from_client
@@ -431,11 +466,10 @@ impl Client {
                         digest: from_layer.digest.clone(),
                         size: from_layer.size as usize,
                     })
+                    .into_stream()
             })
-            .boxed()
-            .buffer_unordered(self.config.max_concurrent_upload)
-            .try_collect::<Vec<_>>()
-            .await?;
+            .flatten()
+            .boxed();
 
         // Create a config for new manifest
         let config = Config::new(
@@ -444,7 +478,7 @@ impl Client {
             manifest.config.annotations.clone(),
         );
 
-        self.push_stream(to_ref, to_layers, config, to_auth, Some(manifest))
+        self.push_stream(to_ref, to_layers, config, to_auth, Some(manifest.clone()))
             .await
     }
 
@@ -541,7 +575,7 @@ impl Client {
     pub async fn push_stream<T: AsyncRead + Send + Sync + 'static>(
         &mut self,
         image_ref: &Reference,
-        layers: Vec<ImageLayerStream<T>>,
+        layers: impl Stream<Item = Result<ImageLayerStream<T>>>,
         config: Config,
         auth: &RegistryAuth,
         manifest: Option<OciImageManifest>,
@@ -552,33 +586,37 @@ impl Client {
             self.auth(image_ref, auth, op).await?;
         }
 
-        let manifest: OciImageManifest = match manifest {
-            Some(m) => m,
-            None => OciImageManifest::build(layers.as_slice(), &config, None),
-        };
-
         // Upload layers
-        stream::iter(layers)
-            .map(|layer| {
+        let manifest_layers = layers
+            .map(|layer_result| {
                 let this = &self;
                 async move {
-                    // this.push_blob_stream_monolithically(image_ref, layer.data, &digest)
-                    //     .await?;
-                    let location = this.begin_push_monolithical_session(image_ref).await?;
-                    this.push_stream_monolithically(
-                        &location,
-                        image_ref,
-                        layer.data,
-                        layer.size,
-                        &layer.digest,
-                    )
-                    .await?;
-                    Ok(()) as Result<()>
+                    match layer_result {
+                        Ok(layer) => {
+                            let dummy = layer.as_dummy();
+                            let location = this.begin_push_monolithical_session(image_ref).await?;
+                            this.push_stream_monolithically(
+                                &location,
+                                image_ref,
+                                layer.data,
+                                layer.size,
+                                &layer.digest,
+                            )
+                            .await?;
+                            Ok(dummy)
+                        }
+                        Err(e) => Err(e),
+                    }
                 }
             })
             .buffer_unordered(self.config.max_concurrent_upload)
-            .try_for_each(future::ok)
+            .try_collect::<Vec<_>>()
             .await?;
+
+        let manifest: OciImageManifest = match manifest {
+            Some(m) => m,
+            None => OciImageManifest::build(manifest_layers.as_slice(), &config, None),
+        };
 
         let config_url = match self
             .push_blob_chunked(image_ref, &config.data, &manifest.config.digest)
