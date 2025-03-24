@@ -450,9 +450,6 @@ impl Client {
             .pull_manifest_and_config(from_ref, from_auth)
             .await?;
 
-        // Nullify media type to increase compatibility with older (source) registries
-        manifest.media_type = None;
-
         // Instruct `push_stream()` to start async reading the blobs from the manifest and create a vector of `ImageLayerStream`s
         // when it starts processing each layer
         let to_layers = stream::iter(manifest.layers.iter())
