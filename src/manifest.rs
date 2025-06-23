@@ -53,7 +53,7 @@ impl OciManifest {
     /// Returns the appropriate content-type for each variant.
     pub fn content_type(&self) -> &str {
         match self {
-            OciManifest::Image(_) => OCI_IMAGE_MEDIA_TYPE,
+            OciManifest::Image(m) => m.media_type.as_deref().unwrap_or(OCI_IMAGE_MEDIA_TYPE),
             OciManifest::ImageIndex(_) => IMAGE_MANIFEST_LIST_MEDIA_TYPE,
         }
     }
