@@ -1305,9 +1305,8 @@ impl Client {
             .extract_location_header(image, res, &reqwest::StatusCode::CREATED)
             .await;
 
-        debug!(?ret, "push_manifest, extract location header");
-
-        if matches!(ret, Err(OciDistributionError::RegistryNoLocationError)) {
+        if matches!(ret, Err(OciDistributionError::RegistryNoLocationError)) ||
+           matches!(ret, Err(OciDistributionError::SpecViolationError(..))) {
             // The registry is violating the OCI Distribution Spec, BUT the OCI
             // image/artifact has been uploaded successfully.
             // The `Location` header contains the sha256 digest of the manifest,
@@ -1315,6 +1314,10 @@ impl Client {
             // The workaround is there because repositories such as
             // AWS ECR are violating this aspect of the spec. This at least let the
             // oci-distribution users interact with these registries.
+
+            // AND it seem quay.io is violating in another way, not returning a Location header 
+            // at all sometimes.
+
             warn!("Registry is not respecting the OCI Distribution Specification: it didn't return the Location of the uploaded Manifest inside of the response headers. Working around this issue...");
 
             let url_base = url
