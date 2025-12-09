@@ -1305,6 +1305,8 @@ impl Client {
             .extract_location_header(image, res, &reqwest::StatusCode::CREATED)
             .await;
 
+        debug!(?ret, "push_manifest, extract location header");
+
         if matches!(ret, Err(OciDistributionError::RegistryNoLocationError)) {
             // The registry is violating the OCI Distribution Spec, BUT the OCI
             // image/artifact has been uploaded successfully.
