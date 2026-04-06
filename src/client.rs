@@ -1637,9 +1637,10 @@ pub fn linux_amd64_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
     manifests
         .iter()
         .find(|entry| {
-            entry.platform.as_ref().is_some_and(|platform| {
-                platform.os == "linux" && platform.architecture == "amd64"
-            })
+            entry
+                .platform
+                .as_ref()
+                .is_some_and(|platform| platform.os == "linux" && platform.architecture == "amd64")
         })
         .map(|entry| entry.digest.clone())
 }
