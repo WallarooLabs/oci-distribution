@@ -133,8 +133,7 @@ struct Empty {}
 /// Helper to deserialize a `map[string]struct{}` of golang
 fn hashset_from_str<'de, D: Deserializer<'de>>(d: D) -> Result<HashSet<String>, D::Error> {
     let res = <HashMap<String, Empty>>::deserialize(d)?
-        .into_iter()
-        .map(|(k, _)| k)
+        .into_keys()
         .collect();
     Ok(res)
 }
@@ -275,7 +274,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use assert_json_diff::assert_json_eq;
-    use chrono::{TimeZone, Utc};
+    use chrono::{DateTime, Utc};
     use serde_json::Value;
 
     use super::{Architecture, Config, ConfigFile, History, Os, Rootfs};
@@ -375,14 +374,14 @@ mod tests {
         };
 
         let history = vec![History {
-            created: Some(Utc.datetime_from_str("2015-10-31T22:22:54.690851953Z", "%+").expect("parse time failed")),
+            created: Some(DateTime::parse_from_str("2015-10-31T22:22:54.690851953Z", "%+").expect("parse time failed").with_timezone(&Utc)),
             author: None,
             created_by: Some("/bin/sh -c #(nop) ADD file:a3bc1e842b69636f9df5256c49c5374fb4eef1e281fe3f282c65fb853ee171c5 in /".into()),
             comment: None,
             empty_layer: None,
         },
         History {
-            created: Some(Utc.datetime_from_str("2015-10-31T22:22:55.613815829Z", "%+").expect("parse time failed")),
+            created: Some(DateTime::parse_from_str("2015-10-31T22:22:55.613815829Z", "%+").expect("parse time failed").with_timezone(&Utc)),
             author: None,
             created_by: Some("/bin/sh -c #(nop) CMD [\"sh\"]".into()),
             comment: None,
@@ -390,8 +389,9 @@ mod tests {
         }];
         ConfigFile {
             created: Some(
-                Utc.datetime_from_str("2015-10-31T22:22:56.015925234Z", "%+")
-                    .expect("parse time failed"),
+                DateTime::parse_from_str("2015-10-31T22:22:56.015925234Z", "%+")
+                    .expect("parse time failed")
+                    .with_timezone(&Utc),
             ),
             author: Some("Alyssa P. Hacker <alyspdev@example.com>".into()),
             architecture: Architecture::Amd64,
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn serialize() {
-        let serialized = serde_json::to_value(&example_config()).expect("serialize failed");
+        let serialized = serde_json::to_value(example_config()).expect("serialize failed");
         let parsed: Value = serde_json::from_str(EXAMPLE_CONFIG).expect("parsed failed");
         assert_json_eq!(serialized, parsed);
     }

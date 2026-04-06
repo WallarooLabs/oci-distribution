@@ -446,7 +446,7 @@ impl Client {
         }
 
         // Get the manifest and config from the from_ref
-        let (mut manifest, _, config_data) = from_client
+        let (manifest, _, config_data) = from_client
             .pull_manifest_and_config(from_ref, from_auth)
             .await?;
 
@@ -1079,7 +1079,7 @@ impl Client {
             .send()
             .await?
             .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+            .map_err(std::io::Error::other);
 
         Ok(FuturesAsyncReadCompatExt::compat(stream.into_async_read()))
     }
@@ -1204,7 +1204,7 @@ impl Client {
 
         let stream = ReaderStream::new(layer);
 
-        let res = RequestBuilderWrapper::from_client(&self, |client| client.put(&url))
+        let res = RequestBuilderWrapper::from_client(self, |client| client.put(&url))
             .apply_auth(image, RegistryOperation::Push)?
             .into_request_builder()
             .headers(headers)
@@ -1470,7 +1470,7 @@ impl<'a> RequestBuilderWrapper<'a> {
     fn from_client(
         client: &'a Client,
         f: impl Fn(&reqwest::Client) -> RequestBuilder,
-    ) -> RequestBuilderWrapper {
+    ) -> RequestBuilderWrapper<'a> {
         let request_builder = f(&client.client);
         RequestBuilderWrapper {
             client,
@@ -1486,7 +1486,7 @@ impl<'a> RequestBuilderWrapper<'a> {
 
 // Composable functions applicable to a `RequestBuilderWrapper`
 impl<'a> RequestBuilderWrapper<'a> {
-    fn apply_accept(&self, accept: &[&str]) -> Result<RequestBuilderWrapper> {
+    fn apply_accept(&self, accept: &[&str]) -> Result<RequestBuilderWrapper<'_>> {
         let request_builder = self
             .request_builder
             .try_clone()
@@ -1513,7 +1513,7 @@ impl<'a> RequestBuilderWrapper<'a> {
         &self,
         image: &Reference,
         op: RegistryOperation,
-    ) -> Result<RequestBuilderWrapper> {
+    ) -> Result<RequestBuilderWrapper<'_>> {
         let mut headers = HeaderMap::new();
 
         if let Some(token) = self.client.tokens.get(image, op) {
@@ -1637,7 +1637,7 @@ pub fn linux_amd64_resolver(manifests: &[ImageIndexEntry]) -> Option<String> {
     manifests
         .iter()
         .find(|entry| {
-            entry.platform.as_ref().map_or(false, |platform| {
+            entry.platform.as_ref().is_some_and(|platform| {
                 platform.os == "linux" && platform.architecture == "amd64"
             })
         })
@@ -1682,7 +1682,7 @@ pub fn current_platform_resolver(manifests: &[ImageIndexEntry]) -> Option<String
     manifests
         .iter()
         .find(|entry| {
-            entry.platform.as_ref().map_or(false, |platform| {
+            entry.platform.as_ref().is_some_and(|platform| {
                 platform.os == go_os() && platform.architecture == go_arch()
             })
         })
@@ -1700,6 +1700,7 @@ pub enum ClientProtocol {
     HttpsExcept(Vec<String>),
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for ClientProtocol {
     fn default() -> Self {
         ClientProtocol::Https
@@ -1746,7 +1747,6 @@ impl TryFrom<&HeaderValue> for BearerChallenge {
                     None
                 }
             })
-            .into_iter()
             .next()
             .ok_or_else(|| "Cannot find Bearer challenge".to_string())
     }
@@ -2076,7 +2076,7 @@ mod test {
     #[test]
     fn can_generate_valid_digest() {
         let bytes = b"hellobytes";
-        let hash = sha256_digest(&bytes.to_vec());
+        let hash = sha256_digest(bytes.as_ref());
 
         let combination = vec![b"hello".to_vec(), b"bytes".to_vec()];
         let combination_hash =
@@ -2786,7 +2786,7 @@ mod test {
 
         c.push_stream(
             &dest_image,
-            pushed_layers,
+            stream::iter(pushed_layers.into_iter().map(Ok)),
             config,
             &RegistryAuth::Anonymous,
             manifest,

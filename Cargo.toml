@@ -35,6 +35,7 @@ trust-dns = ["reqwest/trust-dns"]
 test-registry = []
 
 [dependencies]
+base64 = "0.21"
 chrono = { version = "0.4.23", features = ["serde"] }
 futures = "0.3"
 futures-util = "0.3"
