@@ -750,6 +750,24 @@ impl Client {
             _ => {
                 let reason = auth_res.text().await?;
                 debug!("Failed to authenticate for image '{:?}': {}", image, reason);
+                // Registry advertised Bearer auth but the token endpoint rejected the
+                // request.  This happens with htpasswd-backed registries (e.g. Docker
+                // Registry 2.8.x) that include a Bearer challenge in their
+                // WWW-Authenticate header even though they only understand Basic auth.
+                // Fall back to Basic auth when we have explicit credentials so that the
+                // subsequent push/pull can succeed.
+                if let RegistryAuth::Basic(username, password) = authentication {
+                    debug!(
+                        "Bearer token fetch failed; falling back to Basic auth for '{:?}'",
+                        image
+                    );
+                    self.tokens.insert(
+                        image,
+                        operation,
+                        RegistryTokenType::Basic(username.to_string(), password.to_string()),
+                    );
+                    return Ok(());
+                }
                 Err(OciDistributionError::AuthenticationFailure(reason))
             }
         }
